@@ -32,7 +32,8 @@ process1 ev = do
         (realToFrac $ Prof.totalTimeElapsed totalTime :: Double)
         (Prof.totalTimeTicks totalTime)
         (round $ Prof.totalTimeResolution totalTime :: Int)
-    -- total alloc
+    putStrLn ""
+    putStr $ table $ topHeader $ map top $ Prof.profileTopCostCentres prof
     putStrLn ""
     putStr $ table $ header $ maybe [] (go 0) $ Prof.costCentres prof
   where
@@ -54,18 +55,40 @@ process1 ev = do
 
     go :: Int -> Tree Prof.CostCentre -> [[String]]
     go lvl (Node cc ccs) =
-      [ replicate lvl ' ' ++ T.unpack (Prof.costCentreName cc)
-      , T.unpack (Prof.costCentreModule cc)
-      , maybe "?" T.unpack (Prof.costCentreSrc cc)
-      , printf "%d" (Prof.costCentreEntries cc)
-      , printf "%.01f" (Sci.toRealFloat $ Prof.costCentreIndTime cc :: Double)
-      , printf "%.01f" (Sci.toRealFloat $ Prof.costCentreIndAlloc cc :: Double)
-      , printf "%.01f" (Sci.toRealFloat $ Prof.costCentreInhTime cc :: Double)
-      , printf "%.01f" (Sci.toRealFloat $ Prof.costCentreInhAlloc cc :: Double)
-      , maybe "?" (printf "%d") (Prof.costCentreTicks cc)
-      , maybe "?" (printf "%d") (Prof.costCentreBytes cc)
-      ]
-      : concatMap (go (lvl + 1)) ccs
+        [ replicate lvl ' ' ++ T.unpack (Prof.costCentreName cc)
+        , T.unpack (Prof.costCentreModule cc)
+        , maybe "?" T.unpack (Prof.costCentreSrc cc)
+        , printf "%d" (Prof.costCentreEntries cc)
+        , printf "%.01f" (Sci.toRealFloat $ Prof.costCentreIndTime cc :: Double)
+        , printf "%.01f" (Sci.toRealFloat $ Prof.costCentreIndAlloc cc :: Double)
+        , printf "%.01f" (Sci.toRealFloat $ Prof.costCentreInhTime cc :: Double)
+        , printf "%.01f" (Sci.toRealFloat $ Prof.costCentreInhAlloc cc :: Double)
+        , maybe "?" (printf "%d") (Prof.costCentreTicks cc)
+        , maybe "?" (printf "%d") (Prof.costCentreBytes cc)
+        ]
+        : concatMap (go (lvl + 1)) ccs
+
+    topHeader = (:)
+        [ "COST CENTRE"
+        , "MODULE"
+        , "SRC"
+        , "%time"
+        , "%alloc"
+        , "ticks"
+        , "bytes"
+        ]
+
+    top :: Prof.AggregatedCostCentre -> [String]
+    top acc =
+        [ T.unpack (Prof.aggregatedCostCentreName acc)
+        , T.unpack (Prof.aggregatedCostCentreModule acc)
+        , maybe "?" T.unpack (Prof.aggregatedCostCentreSrc acc)
+        , maybe "?" (printf "%d") (Prof.aggregatedCostCentreEntries acc)
+        , printf "%.01f" (Sci.toRealFloat $ Prof.aggregatedCostCentreTime acc :: Double)
+        , printf "%.01f" (Sci.toRealFloat $ Prof.aggregatedCostCentreAlloc acc :: Double)
+        , maybe "?" (printf "%d") (Prof.aggregatedCostCentreTicks acc)
+        , maybe "?" (printf "%d") (Prof.aggregatedCostCentreBytes acc)
+        ]
 
 table :: [[String]] -> String
 table cells = unlines rows

@@ -9,8 +9,10 @@ module GHC.Events2Prof (
     costCentres,
 ) where
 
-import Data.Word (Word32, Word64)
+import Data.List      (sortBy)
+import Data.Ord       (comparing)
 import Data.Semigroup (Semigroup (..))
+import Data.Word      (Word32, Word64)
 
 import qualified Data.List           as L
 import qualified Data.Map.Strict     as M
@@ -23,7 +25,7 @@ import qualified GHC.Prof.BuildTree  as Prof
 import qualified GHC.RTS.Events      as Ev
 
 -------------------------------------------------------------------------------
--- 
+--
 -------------------------------------------------------------------------------
 
 -- | Convert 'Ev.Eventlog' to @ghc-prof@ 'Prof.Profile'.
@@ -43,10 +45,17 @@ processEvent !acc ev = case Ev.evSpec ev of
         acc { accTickInterval = Just ti }
     Ev.HeapProfCostCentre ccid label m loc _flags ->
         acc { accCostCentres = M.insert ccid (CallCenterInfo label m loc) (accCostCentres acc) } -- TODO: read _flags whether the ccid is a CAF
-    Ev.ProfSampleCostCentre _capset ticks _sd stack ->
-        acc { accSamples = addSample stack s (accSamples acc) }
+    Ev.ProfSampleCostCentre _capset _ticks _sd stack ->
+        acc { accSamplesByStack = addSampleByStack stack s (accSamplesByStack acc)
+            , accSamplesByCC    = addSampleByCC    top   s (accSamplesByCC acc)
+            , accSamplesCount   = 1 + accSamplesCount acc
+            }
       where
         s = Sample { sTicks = 1, sBytes = 0, sEntries = 0 }
+
+        top | VU.null stack = 0
+            | otherwise     = VU.head stack
+
     _ -> acc
 
 -- | Convert an 'Acc'umulator to 'Prof.Profile.
@@ -56,32 +65,71 @@ accToProfile acc = Prof.Profile
     , Prof.profileCommandLine    = maybe "" T.unwords (accCommandLine acc)
     , Prof.profileTotalTime      = Prof.TotalTime
         { Prof.totalTimeElapsed    = 0
-        , Prof.totalTimeTicks      = toInteger (M.foldl' (\ !res s -> res + sTicks s) 0 (accSamples acc))
+        , Prof.totalTimeTicks      = toInteger totalTicks
         , Prof.totalTimeResolution = timeRes
         , Prof.totalTimeProcessors = Nothing
         }
     , Prof.profileTotalAlloc     = Prof.TotalAlloc 0
-    , Prof.profileTopCostCentres = [] -- we don't calculate these atm.
-    , Prof.profileCostCentreTree = Prof.buildTree $ costCentres (accSamples acc) (accCostCentres acc)
+    , Prof.profileTopCostCentres = take 5 $ sortBy cmp
+                                 $ aggregatedCostCentres totalTicks (accSamplesByCC acc) (accCostCentres acc)
+    , Prof.profileCostCentreTree = Prof.buildTree
+                                 $ costCentres totalTicks (accSamplesByStack acc) (accCostCentres acc)
     }
   where
+    cmp = flip (comparing Prof.aggregatedCostCentreTime)
     -- report in microseconds.
-    timeRes = maybe 1e-9 (\ns -> fromIntegral ns / 1000) (accTickInterval acc)
+    timeRes    = maybe 1e-9 (\ns -> fromIntegral ns / 1000) (accTickInterval acc)
+    totalTicks = accSamplesCount acc
 
-addSample
-    :: VU.Vector Word32
+addSampleByStack
+    :: VU.Vector CostCentreId
     -> Sample
     -> M.Map (VU.Vector CostCentreId) Sample
     -> M.Map (VU.Vector CostCentreId) Sample
-addSample stack s m = M.insertWith (<>) stack s m
+addSampleByStack stack s m = M.insertWith (<>) stack s m
+
+addSampleByCC
+    :: CostCentreId
+    -> Sample
+    -> M.Map CostCentreId Sample
+    -> M.Map CostCentreId Sample
+addSampleByCC ccid s m = M.insertWith (<>) ccid s m
+
+aggregatedCostCentres
+    :: Word64
+    -> M.Map CostCentreId Sample
+    -> (M.Map CostCentreId CallCenterInfo)
+    -> [Prof.AggregatedCostCentre]
+aggregatedCostCentres totalTicks m0 cc0 =
+    [ mkAggregatedCostCentre ccid s
+    | (ccid, s) <- M.toList m0
+    ]
+  where
+    mkAggregatedCostCentre :: CostCentreId -> Sample -> Prof.AggregatedCostCentre
+    mkAggregatedCostCentre ccid s = Prof.AggregatedCostCentre
+        { Prof.aggregatedCostCentreName    = cciLabel cc
+        , Prof.aggregatedCostCentreModule  = cciMod cc
+        , Prof.aggregatedCostCentreSrc     = Just (cciSrcLoc cc)
+        , Prof.aggregatedCostCentreEntries = Just (toInteger (sEntries s))
+        , Prof.aggregatedCostCentreTime    = ticksToTime (sTicks s)
+        , Prof.aggregatedCostCentreAlloc   = 0 -- TODO
+        , Prof.aggregatedCostCentreTicks   = Just (toInteger (sTicks s))
+        , Prof.aggregatedCostCentreBytes   = Just (toInteger (sBytes s))
+        }
+      where
+        cc = M.findWithDefault defaultCallCenterInfo ccid cc0
+
+    ticksToTime :: Word64 -> S.Scientific
+    ticksToTime ticks = S.fromFloatDigits (100 * fromIntegral ticks / fromIntegral totalTicks :: Double)
 
 -- | Convert accumulated data into list of levels and costcentres,
 -- so ghc-prof can build its CostCentreTree.
 costCentres
-    :: M.Map (VU.Vector CostCentreId) Sample
+    :: Word64  -- ^ total sample count (ticks)
+    -> M.Map (VU.Vector CostCentreId) Sample
     -> (M.Map CostCentreId CallCenterInfo)
     -> [(Prof.Level, Prof.CostCentre)]
-costCentres m0 cc0 =
+costCentres totalTicks m0 cc0 =
     [ (VU.length ccid, mkCostCentre n ccid as)
     | (n, (ccid, as)) <- zip [1..] (M.toList accSampleMap)
     ]
@@ -106,11 +154,7 @@ costCentres m0 cc0 =
         s =  M.findWithDefault mempty (VU.reverse ccid) m0
 
     ticksToTime :: Word64 -> S.Scientific
-    ticksToTime ticks = S.fromFloatDigits (100 * fromIntegral ticks / totalTicks)
-
-    -- time (and allocation) are represented in percentages.
-    totalTicks :: Double
-    totalTicks = fromIntegral $ M.foldl' (\ !acc s -> acc + sTicks s) 0 m0
+    ticksToTime ticks = S.fromFloatDigits (100 * fromIntegral ticks / fromIntegral totalTicks :: Double)
 
     -- For each call stack we take partial callstacks and accumulate data.
     accSampleMap :: M.Map (VU.Vector CostCentreId) Sample
@@ -135,19 +179,23 @@ type CostCentreId = Word32
 
 -- | Accumulator.
 data Acc = Acc
-    { accCommandLine  :: !(Maybe [T.Text])   -- ^ The command-line arguments passed to the program. @PROGRAM_ARGS@
-    , accTickInterval :: !(Maybe Word64)     -- ^ tick interval in nanoseconds. @PROF_BEGIN@
-    , accCostCentres  :: !(M.Map CostCentreId CallCenterInfo)
-    , accSamples      :: !(M.Map (VU.Vector CostCentreId) Sample)
+    { accCommandLine    :: !(Maybe [T.Text])   -- ^ The command-line arguments passed to the program. @PROGRAM_ARGS@
+    , accTickInterval   :: !(Maybe Word64)     -- ^ tick interval in nanoseconds. @PROF_BEGIN@
+    , accCostCentres    :: !(M.Map CostCentreId CallCenterInfo)
+    , accSamplesByCC    :: !(M.Map CostCentreId Sample)
+    , accSamplesByStack :: !(M.Map (VU.Vector CostCentreId) Sample)
+    , accSamplesCount   :: !Word64
     }
   deriving Show
 
 emptyAcc :: Acc
 emptyAcc = Acc
-    { accCommandLine  = Nothing
-    , accTickInterval = Nothing
-    , accCostCentres  = M.empty
-    , accSamples      = M.empty
+    { accCommandLine    = Nothing
+    , accTickInterval   = Nothing
+    , accCostCentres    = M.empty
+    , accSamplesByCC    = M.empty
+    , accSamplesByStack = M.empty
+    , accSamplesCount   = 0
     }
 
 data CallCenterInfo = CallCenterInfo
