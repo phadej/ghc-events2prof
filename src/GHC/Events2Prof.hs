@@ -46,7 +46,7 @@ processEvent !acc ev = case Ev.evSpec ev of
     Ev.ProfSampleCostCentre _capset ticks _sd stack ->
         acc { accSamples = addSample stack s (accSamples acc) }
       where
-        s = Sample { sTicks = ticks, sBytes = 0, sEntries = 0 }
+        s = Sample { sTicks = 1, sBytes = 0, sEntries = 0 }
     _ -> acc
 
 -- | Convert an 'Acc'umulator to 'Prof.Profile.
@@ -98,7 +98,7 @@ costCentres m0 cc0 =
         , Prof.costCentreInhTime  = ticksToTime (sTicks as)
         , Prof.costCentreInhAlloc = 0 -- TODO
         , Prof.costCentreTicks    = Just (toInteger (sTicks s))
-        , Prof.costCentreBytes    = Nothing -- TODO
+        , Prof.costCentreBytes    = Just (toInteger (sBytes s))
         }
       where
         cc | VU.null ccid = mainCallCenterInfo
