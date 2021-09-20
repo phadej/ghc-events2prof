@@ -56,14 +56,17 @@ accToProfile acc = Prof.Profile
     , Prof.profileCommandLine    = maybe "" T.unwords (accCommandLine acc)
     , Prof.profileTotalTime      = Prof.TotalTime
         { Prof.totalTimeElapsed    = 0
-        , Prof.totalTimeTicks      = 0
-        , Prof.totalTimeResolution = 0
+        , Prof.totalTimeTicks      = toInteger (M.foldl' (\ !res s -> res + sTicks s) 0 (accSamples acc))
+        , Prof.totalTimeResolution = timeRes
         , Prof.totalTimeProcessors = Nothing
         }
     , Prof.profileTotalAlloc     = Prof.TotalAlloc 0
     , Prof.profileTopCostCentres = [] -- we don't calculate these atm.
     , Prof.profileCostCentreTree = Prof.buildTree $ costCentres (accSamples acc) (accCostCentres acc)
     }
+  where
+    -- report in microseconds.
+    timeRes = maybe 1e-9 (\ns -> fromIntegral ns / 1000) (accTickInterval acc)
 
 addSample
     :: VU.Vector Word32
